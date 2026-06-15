@@ -31,7 +31,36 @@ BASE_URL = "https://apiconnect.angelbroking.com"
 # ── Pure-Python TOTP (no pyotp dependency) ───────────────────────────────────
 def _totp(secret: str) -> str:
     """Generate current 6-digit TOTP from base32 secret."""
-    key      = base64.b32decode(secret.upper().replace(" ", ""))
+    if not secret:
+        raise ValueError("ANGEL_TOTP_SECRET is empty — set it in Railway Variables")
+
+    # Clean secret — remove spaces, dashes, equals, quotes
+    secret = secret.upper().strip().replace(" ", "").replace("-", "").replace("=", "").replace("'","").replace('"',"")
+
+    # Validate characters (Base32 uses A-Z and 2-7 only)
+    invalid = set(secret) - set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+    if invalid:
+        raise ValueError(
+            f"ANGEL_TOTP_SECRET contains invalid Base32 characters: {invalid}. "
+            f"Valid chars are A-Z and 2-7 only. Got: {secret!r}"
+        )
+
+    # Base32 valid unpadded lengths per group: 2, 4, 5, 7, 0(=8)
+    pad_map = {0:0, 2:6, 4:4, 5:3, 7:1}
+    remainder = len(secret) % 8
+    if remainder not in pad_map:
+        secret = secret[:-1]   # trim 1 char to reach valid length
+        remainder = len(secret) % 8
+    secret = secret + "=" * pad_map.get(remainder, 0)
+
+    try:
+        key = base64.b32decode(secret)
+    except Exception as e:
+        raise ValueError(
+            f"ANGEL_TOTP_SECRET decode failed: {e}. "
+            f"Check Railway Variables — the secret must be the Base32 string "
+            f"shown under 'Can\'t scan QR? Enter manually' in Angel One TOTP setup."
+        )
     counter  = struct.pack(">Q", int(time.time()) // 30)
     mac      = hmac.new(key, counter, hashlib.sha1).digest()
     offset   = mac[-1] & 0x0F
@@ -63,8 +92,12 @@ class AngelClient:
             "X-PrivateKey":  self.api_key,
         })
 
-        # Auto-login on startup
-        self.ensure_token()
+        # Auto-login on startup — catch errors so server still boots
+        try:
+            self.ensure_token()
+        except Exception as e:
+            logger.error(f"Startup login failed: {e}")
+            logger.warning("Server will start without a token — fix credentials and call /refresh_token")
 
     # ── Token management ──────────────────────────────────────────────────────
 
