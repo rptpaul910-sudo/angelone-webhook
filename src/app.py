@@ -142,12 +142,39 @@ td{padding:8px 10px;border-bottom:1px solid var(--br);}
 
   <!-- Webhook info -->
   <div class="card" style="margin-bottom:20px">
-    <div class="lbl" style="margin-bottom:8px">TRADINGVIEW WEBHOOK URL</div>
-    <div id="webhook-url" style="color:var(--y);font-size:12px;word-break:break-all">—</div>
-    <div style="margin-top:8px;font-size:11px;color:var(--mu)">
-      BUY alert message:  <code style="color:var(--g)">{"action":"BUY","secret":"YOUR_TV_SECRET"}</code><br>
-      SELL alert message: <code style="color:var(--r)">{"action":"SELL","secret":"YOUR_TV_SECRET"}</code>
+    <div class="lbl" style="margin-bottom:12px">TRADINGVIEW WEBHOOK URLS</div>
+
+    <!-- Essential Plan -->
+    <div style="background:var(--sf2);border:1px solid var(--br);border-radius:6px;padding:12px 14px;margin-bottom:10px">
+      <div style="font-size:10px;color:var(--y);letter-spacing:1px;font-weight:700;margin-bottom:8px">
+        ⭐ ESSENTIAL PLAN — Use two separate URLs (no JSON needed)
+      </div>
+      <div style="margin-bottom:6px">
+        <span style="font-size:10px;color:var(--g);font-weight:700">BUY ALERT</span> — paste this as Webhook URL:
+        <div id="buy-url" style="color:var(--g);font-size:11px;word-break:break-all;background:#00e67611;border-radius:4px;padding:5px 8px;margin-top:4px;cursor:pointer" onclick="copyUrl('buy-url')" title="Click to copy">—</div>
+      </div>
+      <div>
+        <span style="font-size:10px;color:var(--r);font-weight:700">SELL ALERT</span> — paste this as Webhook URL:
+        <div id="sell-url" style="color:var(--r);font-size:11px;word-break:break-all;background:#ff525211;border-radius:4px;padding:5px 8px;margin-top:4px;cursor:pointer" onclick="copyUrl('sell-url')" title="Click to copy">—</div>
+      </div>
+      <div style="font-size:10px;color:var(--mu);margin-top:8px">
+        💡 Leave the Message field in TradingView as-is — no changes needed there.
+        Click a URL above to copy it.
+      </div>
     </div>
+
+    <!-- Pro Plan -->
+    <div style="background:var(--sf2);border:1px solid var(--br);border-radius:6px;padding:10px 14px">
+      <div style="font-size:10px;color:var(--mu);letter-spacing:1px;font-weight:700;margin-bottom:6px">
+        PRO / PREMIUM PLAN — Single URL + JSON message
+      </div>
+      <div style="font-size:11px;color:var(--mu)">
+        Webhook URL: <span id="webhook-url" style="color:var(--y)">—</span><br>
+        BUY message:  <code style="color:var(--g)">{"action":"BUY","secret":"YOUR_TV_SECRET"}</code><br>
+        SELL message: <code style="color:var(--r)">{"action":"SELL","secret":"YOUR_TV_SECRET"}</code>
+      </div>
+    </div>
+    <div id="copy-toast" style="display:none;font-size:11px;color:var(--g);margin-top:6px">✅ Copied to clipboard!</div>
   </div>
 
   <!-- Trade log -->
@@ -216,7 +243,12 @@ async function refresh(){
   document.getElementById('btn-sell').disabled = s.position==='FLAT';
 
   // Webhook URL
-  document.getElementById('webhook-url').textContent = window.location.origin+'/webhook';
+  // Populate webhook URLs
+  const base    = window.location.origin;
+  const tvSecret = '{{ tv_secret }}';  // filled from server
+  document.getElementById('webhook-url').textContent = base+'/webhook';
+  document.getElementById('buy-url').textContent     = base+'/webhook/buy?secret='+tvSecret;
+  document.getElementById('sell-url').textContent    = base+'/webhook/sell?secret='+tvSecret;
 
   // Trades
   if(t.trades&&t.trades.length){
@@ -241,6 +273,14 @@ async function order(side){
 }
 
 refresh(); setInterval(refresh, 20000);
+
+function copyUrl(id){
+  const text = document.getElementById(id).textContent;
+  navigator.clipboard.writeText(text).then(()=>{
+    document.getElementById('copy-toast').style.display='block';
+    setTimeout(()=>document.getElementById('copy-toast').style.display='none',2000);
+  });
+}
 </script></body></html>"""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -510,7 +550,9 @@ fetch('/api/status').then(r=>r.json()).then(d=>{
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.route("/")
-def index(): return render_template_string(DASH_HTML)
+def index():
+    html = DASH_HTML.replace("{{ tv_secret }}", TV_SECRET)
+    return render_template_string(html)
 
 @app.route("/option")
 def option_page(): return render_template_string(OPTION_HTML)
@@ -524,49 +566,81 @@ def refresh_token():
     except Exception as e:
         return f"<pre>Token refresh failed: {e}</pre>", 500
 
-# ── Core webhook ──────────────────────────────────────────────────────────────
+# ── Webhook helpers ───────────────────────────────────────────────────────────
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data   = request.get_json(force=True) or {}
-    ip     = request.headers.get("X-Forwarded-For", request.remote_addr)
-    logger.info(f"Webhook received from {ip}: {data}")
+def _log_wh(action, status, note="", ip="?"):
+    try:
+        lp    = Path("logs/webhook_calls.json")
+        calls = json.loads(lp.read_text()) if lp.exists() else []
+        calls.append({"time": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+                      "action": action, "status": status, "ip": ip, "note": note})
+        lp.write_text(json.dumps(calls[-100:], indent=2))
+    except Exception as e:
+        logger.error(f"Webhook log error: {e}")
 
-    def _log_call(action, status, note=""):
-        try:
-            log_path = Path("logs/webhook_calls.json")
-            calls    = json.loads(log_path.read_text()) if log_path.exists() else []
-            calls.append({
-                "time":   datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
-                "action": action or data.get("action","?"),
-                "status": status,
-                "ip":     ip,
-                "note":   note,
-            })
-            log_path.write_text(json.dumps(calls[-100:], indent=2))  # keep last 100
-        except Exception as e:
-            logger.error(f"Webhook log write error: {e}")
 
-    # Secret check
-    if TV_SECRET and data.get("secret") != TV_SECRET:
-        logger.warning(f"Webhook rejected — invalid secret from {ip}")
-        _log_call("?", "rejected", "Invalid secret")
+def _handle_wh(action: str, secret: str = "", ip: str = "?"):
+    """Core logic shared by all webhook routes."""
+    logger.info(f"Webhook: action={action} ip={ip}")
+    if TV_SECRET and secret != TV_SECRET:
+        logger.warning(f"Webhook rejected — bad secret from {ip}")
+        _log_wh(action or "?", "rejected", "Invalid secret", ip)
         return jsonify({"error": "unauthorized"}), 401
-
-    action = data.get("action", "").upper()
     if action not in ("BUY", "SELL"):
-        _log_call(action, "error", f"unknown action: {action}")
+        _log_wh(action or "?", "error", "unknown action", ip)
         return jsonify({"error": f"unknown action '{action}'"}), 400
-
     if not active["symbol_token"]:
-        _log_call(action, "error", "No option selected")
-        return jsonify({"error": "No option selected — go to /option"}), 400
-
-    result = _execute_order(action)
-    result_data = result.get_json()
-    _log_call(action, result_data.get("status","?"),
-              result_data.get("error","") or ("dry_run" if DRY_RUN else "live"))
+        _log_wh(action, "error", "No option selected", ip)
+        return jsonify({"error": "No option selected — go to /option first"}), 400
+    result   = _execute_order(action)
+    res_data = result.get_json()
+    _log_wh(action, res_data.get("status","?"),
+            res_data.get("error","") or ("dry_run" if DRY_RUN else "live"), ip)
     return result
+
+
+# ── Webhook routes ─────────────────────────────────────────────────────────────
+
+@app.route("/webhook", methods=["POST", "GET"])
+def webhook():
+    """
+    Universal webhook — all TradingView plans.
+    Pro/Premium  → POST with JSON body: {"action":"BUY","secret":"..."}
+    Essential    → GET/POST with URL params: /webhook?action=BUY&secret=...
+    """
+    ip   = request.headers.get("X-Forwarded-For", request.remote_addr)
+    data = {}
+    try: data = request.get_json(force=True) or {}
+    except Exception: pass
+    action = (data.get("action") or request.args.get("action") or "").upper()
+    secret = data.get("secret") or request.args.get("secret") or ""
+    return _handle_wh(action, secret, ip)
+
+
+@app.route("/webhook/buy", methods=["POST", "GET"])
+def webhook_buy():
+    """
+    Dedicated BUY endpoint for TradingView Essential plan.
+    Set this as Webhook URL in your BUY alert:
+      https://YOUR-APP.up.railway.app/webhook/buy?secret=YOUR_TV_SECRET
+    No JSON message needed — the URL carries the action.
+    """
+    ip     = request.headers.get("X-Forwarded-For", request.remote_addr)
+    secret = request.args.get("secret", "")
+    return _handle_wh("BUY", secret, ip)
+
+
+@app.route("/webhook/sell", methods=["POST", "GET"])
+def webhook_sell():
+    """
+    Dedicated SELL endpoint for TradingView Essential plan.
+    Set this as Webhook URL in your SELL alert:
+      https://YOUR-APP.up.railway.app/webhook/sell?secret=YOUR_TV_SECRET
+    No JSON message needed — the URL carries the action.
+    """
+    ip     = request.headers.get("X-Forwarded-For", request.remote_addr)
+    secret = request.args.get("secret", "")
+    return _handle_wh("SELL", secret, ip)
 
 # ── API routes ────────────────────────────────────────────────────────────────
 
