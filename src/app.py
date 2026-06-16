@@ -191,9 +191,19 @@ async function refresh(){
     : 'No option selected — click Select Option';
 
   // Stats
-  document.getElementById('s-ltp').textContent   = s.ltp||'—';
+  if(s.ltp){
+    document.getElementById('s-ltp').textContent = s.ltp.toFixed(2);
+    document.getElementById('s-ltp').className   = 'val yw';
+  } else if(s.ltp_error){
+    document.getElementById('s-ltp').textContent = 'ERR';
+    document.getElementById('s-ltp').title       = s.ltp_error;
+    document.getElementById('s-ltp').className   = 'val rd';
+  } else {
+    document.getElementById('s-ltp').textContent = s.symbol_token ? 'Loading...' : '—';
+    document.getElementById('s-ltp').className   = 'val';
+  }
   document.getElementById('s-pos').textContent   = s.position;
-  document.getElementById('s-entry').textContent = s.entry_price||'—';
+  document.getElementById('s-entry').textContent = s.entry_price ? s.entry_price.toFixed(2) : '—';
   document.getElementById('s-lot').textContent   = s.lotsize||'—';
   document.getElementById('s-sig').textContent   = s.last_signal||'—';
   const p=document.getElementById('s-pnl');
@@ -444,17 +454,20 @@ def webhook():
 
 @app.route("/api/status")
 def api_status():
-    # Try get LTP
-    ltp = None
+    # Try get LTP — log error clearly so we can debug
+    ltp       = None
+    ltp_error = None
     if active["symbol_token"] and client.jwt_token:
         try:
             ltp = client.get_ltp("NFO", active["trading_symbol"], active["symbol_token"])
-        except Exception:
-            pass
+        except Exception as e:
+            ltp_error = str(e)
+            logger.error(f"LTP fetch error: {e}")
     return jsonify({
         **tracker.status(),
         **active,
         "ltp":          ltp,
+        "ltp_error":    ltp_error,
         "last_signal":  getattr(tracker, "_last_signal", None),
         "token_date":   client.token_date,
         "timestamp":    datetime.now(IST).isoformat(),
@@ -533,12 +546,20 @@ def _execute_order(action: str):
         return jsonify({"status": "skipped", "reason": "No open position to sell"})
 
     try:
-        # Get current LTP for logging
+        # Get current LTP — retry once on failure
         ltp = 0.0
-        try:
-            ltp = client.get_ltp("NFO", active["trading_symbol"], active["symbol_token"])
-        except Exception:
-            pass
+        for attempt in range(2):
+            try:
+                ltp = client.get_ltp("NFO", active["trading_symbol"], active["symbol_token"])
+                break
+            except Exception as e:
+                logger.warning(f"LTP fetch attempt {attempt+1} failed: {e}")
+                if attempt == 0:
+                    # Try refreshing token then retry
+                    try: client.ensure_token()
+                    except Exception: pass
+        if ltp == 0:
+            logger.warning(f"Could not get LTP for {active['trading_symbol']} — order will proceed with price=0 (MARKET order)")
 
         lot = active["lotsize"]
         logger.info(

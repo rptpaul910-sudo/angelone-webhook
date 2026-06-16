@@ -211,12 +211,18 @@ class AngelClient:
             "tradingsymbol": trading_symbol,
             "symboltoken":   symbol_token,
         }
+        logger.info(f"LTP request: {payload}")
         r = self._call("post",
                        f"{BASE_URL}/rest/secure/angelbroking/order/v1/getLtpData",
                        json=payload)
+        logger.info(f"LTP response [{r.status_code}]: {r.text}")
         r.raise_for_status()
-        data = r.json()
-        return float(data["data"]["ltp"])
+        resp = r.json()
+        if not resp.get("status"):
+            raise RuntimeError(f"LTP fetch failed: {resp.get('message', resp)}")
+        ltp = float(resp["data"]["ltp"])
+        logger.info(f"LTP for {trading_symbol}: {ltp}")
+        return ltp
 
     def get_positions(self) -> list:
         r = self._call("get",
