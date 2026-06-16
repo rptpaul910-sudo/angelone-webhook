@@ -119,7 +119,8 @@ td{padding:8px 10px;border-bottom:1px solid var(--br);}
     <div class="sym" id="a-sym">—</div>
     <div class="meta" id="a-meta">No option selected — go to Option Selector</div>
     <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
-      <a href="/option" class="btn btn-b">⚙️ Select Option</a>
+      <a href="/option"       class="btn btn-b">⚙️ Select Option</a>
+      <a href="/webhook_log" class="btn btn-o" style="font-size:12px">📋 Webhook Log</a>
     </div>
   </div>
 
@@ -528,21 +529,44 @@ def refresh_token():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data   = request.get_json(force=True) or {}
-    logger.info(f"Webhook received: {data}")
+    ip     = request.headers.get("X-Forwarded-For", request.remote_addr)
+    logger.info(f"Webhook received from {ip}: {data}")
+
+    def _log_call(action, status, note=""):
+        try:
+            log_path = Path("logs/webhook_calls.json")
+            calls    = json.loads(log_path.read_text()) if log_path.exists() else []
+            calls.append({
+                "time":   datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+                "action": action or data.get("action","?"),
+                "status": status,
+                "ip":     ip,
+                "note":   note,
+            })
+            log_path.write_text(json.dumps(calls[-100:], indent=2))  # keep last 100
+        except Exception as e:
+            logger.error(f"Webhook log write error: {e}")
 
     # Secret check
     if TV_SECRET and data.get("secret") != TV_SECRET:
-        logger.warning("Webhook rejected — invalid secret")
+        logger.warning(f"Webhook rejected — invalid secret from {ip}")
+        _log_call("?", "rejected", "Invalid secret")
         return jsonify({"error": "unauthorized"}), 401
 
     action = data.get("action", "").upper()
     if action not in ("BUY", "SELL"):
+        _log_call(action, "error", f"unknown action: {action}")
         return jsonify({"error": f"unknown action '{action}'"}), 400
 
     if not active["symbol_token"]:
+        _log_call(action, "error", "No option selected")
         return jsonify({"error": "No option selected — go to /option"}), 400
 
-    return _execute_order(action)
+    result = _execute_order(action)
+    result_data = result.get_json()
+    _log_call(action, result_data.get("status","?"),
+              result_data.get("error","") or ("dry_run" if DRY_RUN else "live"))
+    return result
 
 # ── API routes ────────────────────────────────────────────────────────────────
 
@@ -669,6 +693,56 @@ def api_manual_order():
     if not active["symbol_token"]:
         return jsonify({"status": "error", "error": "No option selected"}), 400
     return _execute_order(side)
+
+@app.route("/webhook_log")
+def webhook_log():
+    """Show last 20 webhook calls received — for debugging TradingView connection."""
+    try:
+        log = json.loads(Path("logs/webhook_calls.json").read_text()) if Path("logs/webhook_calls.json").exists() else []
+    except Exception:
+        log = []
+    rows = "".join(
+        f"<tr style='border-bottom:1px solid #1e2330'>"
+        f"<td style='padding:8px;color:#6b7280'>{e['time']}</td>"
+        f"<td style='padding:8px;color:#ffd740'>{e['action']}</td>"
+        f"<td style='padding:8px;color:{'#00e676' if e['status']=='ok' else '#ff5252'}'>{e['status']}</td>"
+        f"<td style='padding:8px;color:#6b7280;font-size:11px'>{e.get('ip','?')}</td>"
+        f"<td style='padding:8px;color:#6b7280;font-size:11px'>{e.get('note','')}</td>"
+        f"</tr>"
+        for e in reversed(log[-20:])
+    )
+    return f"""<!DOCTYPE html><html><head><meta charset='UTF-8'>
+    <meta http-equiv='refresh' content='10'>
+    <title>Webhook Log</title>
+    <style>body{{background:#0d0f14;color:#e8eaf0;font-family:monospace;padding:24px}}
+    a{{color:#3b82f6}}table{{width:100%;border-collapse:collapse}}
+    th{{text-align:left;color:#6b7280;font-size:11px;padding:6px 8px;border-bottom:1px solid #1e2330}}</style>
+    </head><body>
+    <h2 style='color:#00e676;margin-bottom:4px'>🔔 Webhook Call Log</h2>
+    <p style='color:#6b7280;font-size:12px;margin-bottom:16px'>
+      Auto-refreshes every 10s — shows last 20 webhook calls received from TradingView.<br>
+      <a href='/'>← Dashboard</a> &nbsp;|&nbsp;
+      <a href='/webhook_log'>🔄 Refresh</a>
+    </p>
+    <table><thead><tr><th>TIME (IST)</th><th>ACTION</th><th>STATUS</th><th>IP</th><th>NOTE</th></tr></thead>
+    <tbody>{rows or "<tr><td colspan='5' style='padding:20px;color:#6b7280;text-align:center'>No webhook calls received yet — fire a TradingView alert or use the test below</td></tr>"}</tbody>
+    </table>
+    <div style='margin-top:24px;background:#161920;border:1px solid #1e2330;border-radius:8px;padding:16px'>
+      <div style='font-size:11px;color:#6b7280;margin-bottom:8px'>TEST WEBHOOK (simulates TradingView alert):</div>
+      <button onclick="testWh('BUY')"  style='background:#00e676;color:#000;border:none;padding:8px 18px;border-radius:6px;font-weight:700;cursor:pointer;margin-right:8px'>▲ Test BUY</button>
+      <button onclick="testWh('SELL')" style='background:#ff5252;color:#fff;border:none;padding:8px 18px;border-radius:6px;font-weight:700;cursor:pointer'>▼ Test SELL</button>
+      <span id='tres' style='margin-left:12px;font-size:12px'></span>
+    </div>
+    <script>
+    async function testWh(action){{
+      const r = await fetch('/webhook',{{method:'POST',
+        headers:{{'Content-Type':'application/json'}},
+        body:JSON.stringify({{action,secret:'{os.environ.get("TV_SECRET","")}'}})}});
+      const d = await r.json();
+      document.getElementById('tres').textContent = JSON.stringify(d);
+      setTimeout(()=>location.reload(), 1000);
+    }}
+    </script></body></html>"""
 
 @app.route("/favicon.ico")
 def favicon(): return "", 204
