@@ -204,6 +204,22 @@ class AngelClient:
         r.raise_for_status()
         return r.json()
 
+    def get_nifty_spot(self) -> float:
+        """
+        Get NIFTY 50 index spot price.
+        token=26000, symbol=Nifty 50, exchange=NSE
+        """
+        try:
+            return self.get_ltp("NSE", "Nifty 50", "26000")
+        except Exception:
+            # Fallback symbol variants
+            for sym, tok in [("NIFTY 50","26000"),("NIFTY","26000"),("Nifty50","26000")]:
+                try:
+                    return self.get_ltp("NSE", sym, tok)
+                except Exception:
+                    continue
+            raise RuntimeError("Could not fetch NIFTY spot price")
+
     def get_ltp(self, exchange: str, trading_symbol: str, symbol_token: str) -> float:
         """Get last traded price for an instrument."""
         payload = {

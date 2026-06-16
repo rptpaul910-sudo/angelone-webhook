@@ -287,10 +287,30 @@ tr:hover td{background:#ffffff05;}
   <h1>⚙️ OPTION SELECTOR</h1>
 </header>
 <main>
+  <!-- Spot price bar -->
+  <div id="spot-bar" style="background:var(--sf);border:1px solid var(--br);border-radius:8px;
+    padding:12px 18px;margin-bottom:14px;display:flex;gap:24px;flex-wrap:wrap;align-items:center;">
+    <div>
+      <div style="font-size:10px;color:var(--mu);letter-spacing:1px;text-transform:uppercase;margin-bottom:3px">NIFTY SPOT</div>
+      <div id="spot-val" style="font-size:22px;font-weight:700;color:var(--y)">—</div>
+    </div>
+    <div>
+      <div style="font-size:10px;color:var(--mu);letter-spacing:1px;text-transform:uppercase;margin-bottom:3px">ATM STRIKE</div>
+      <div id="atm-val" style="font-size:22px;font-weight:700;color:var(--g)">—</div>
+    </div>
+    <div>
+      <div style="font-size:10px;color:var(--mu);letter-spacing:1px;text-transform:uppercase;margin-bottom:3px">SHOWING RANGE</div>
+      <div id="range-val" style="font-size:16px;font-weight:700;color:var(--b)">ATM ± 500</div>
+    </div>
+    <div style="margin-left:auto;font-size:11px;color:var(--mu);line-height:1.6">
+      Strikes auto-filtered ±500 from spot.<br>
+      Enter a specific strike to override.
+    </div>
+  </div>
+
   <div class="hint">
-    Search for a NIFTY option strike below. The instrument master is downloaded live from
-    Angel One. Select a strike → click <strong>SET ACTIVE</strong> → webhook will trade that option.<br>
-    ⚠️ NIFTY weekly options expire every <strong>Thursday</strong> — update the strike weekly.
+    Select a NIFTY option → click <strong>USE</strong> → webhook trades that option.<br>
+    ⚠️ NIFTY weekly options expire every <strong>Tuesday</strong> — re-select strike each week.
   </div>
 
   <div id="active-info">
@@ -381,31 +401,64 @@ async function loadExpiries(){
   } catch(e){ console.log('Expiry load failed:', e); }
 }
 
+let lastSpot = null;
+let lastAtm  = null;
+
 async function search(){
   const underlying = document.getElementById('underlying').value;
   const optType    = document.getElementById('opt-type').value;
   const strike     = document.getElementById('strike').value;
   const expiry     = document.getElementById('expiry-sel').value;
-  document.getElementById('status').textContent='Searching...';
+  document.getElementById('status').textContent='Fetching NIFTY spot & searching...';
   document.getElementById('results-card').style.display='none';
-  const r = await fetch(`/api/search?underlying=${underlying}&type=${optType}&strike=${strike}&expiry=${expiry}`);
+
+  const r = await fetch(`/api/search?underlying=${underlying}&type=${optType}&strike=${strike}&expiry=${expiry}&range=500`);
   const d = await r.json();
+
+  // Update spot bar
+  if(d.spot){
+    lastSpot = d.spot;
+    lastAtm  = d.atm;
+    document.getElementById('spot-val').textContent  = d.spot.toLocaleString('en-IN', {maximumFractionDigits:2});
+    document.getElementById('atm-val').textContent   = d.atm.toLocaleString('en-IN');
+    document.getElementById('range-val').textContent = `${(d.atm-500).toLocaleString('en-IN')} – ${(d.atm+500).toLocaleString('en-IN')}`;
+  } else if(d.spot_error){
+    document.getElementById('spot-val').textContent  = 'N/A';
+    document.getElementById('atm-val').textContent   = '—';
+    document.getElementById('range-val').textContent = 'Login to see spot';
+  }
+
   if(d.error){ document.getElementById('status').textContent='❌ Error: '+d.error; return; }
-  document.getElementById('status').textContent = d.results.length+' contracts found for expiry '+expiry;
+
+  const spotInfo = d.spot ? ` | NIFTY @ ${d.spot.toFixed(0)} | ATM ${d.atm}` : '';
+  document.getElementById('status').textContent =
+    `${d.results.length} contracts${strike?' for strike '+strike:' within ±500 of ATM'}${spotInfo}`;
+
   if(!d.results.length){
-    document.getElementById('status').textContent='No contracts found — try a different expiry or clear the strike filter';
+    document.getElementById('status').textContent='No contracts found — try different expiry or change strike';
     return;
   }
-  document.getElementById('results-body').innerHTML = d.results.map(x=>
-    `<tr>
-      <td style="color:var(--y)">${x.trading_symbol}</td>
+
+  document.getElementById('results-body').innerHTML = d.results.map(x=>{
+    const isAtm   = lastAtm && x.strike === lastAtm;
+    const isNear  = lastAtm && Math.abs(x.strike - lastAtm) <= 100;
+    const rowStyle = isAtm ? 'background:#ffd74011' : '';
+    const atmTag   = isAtm ? ' <span style="color:var(--y);font-size:10px">ATM</span>' : '';
+    return `<tr style="${rowStyle}">
+      <td style="color:var(--y)">${x.trading_symbol}${atmTag}</td>
       <td style="color:var(--mu);font-size:11px">${x.symbol_token}</td>
-      <td>${x.strike.toLocaleString('en-IN')}</td>
+      <td style="${isAtm?'color:var(--y);font-weight:700':''}">
+        ${x.strike.toLocaleString('en-IN')}
+        ${lastAtm?'<span style="font-size:10px;color:var(--mu);margin-left:4px">('+
+          (x.strike>lastAtm?'+':'')+(x.strike-lastAtm).toFixed(0)+')</span>':''}
+      </td>
       <td style="color:var(--g)">${x.expiry_display}</td>
       <td>${x.lotsize}</td>
-      <td><button class="use-btn" onclick="apply('${x.symbol_token}','${x.trading_symbol}',${x.strike},'${document.getElementById('opt-type').value}','${x.expiry}',${x.lotsize})">USE</button></td>
-    </tr>`
-  ).join('');
+      <td><button class="use-btn" onclick="apply('${x.symbol_token}','${x.trading_symbol}',
+        ${x.strike},'${document.getElementById('opt-type').value}',
+        '${x.expiry}',${x.lotsize})">USE</button></td>
+    </tr>`;
+  }).join('');
   document.getElementById('results-card').style.display='block';
 }
 
@@ -550,15 +603,47 @@ def api_search():
     opt_type   = request.args.get("type", "CE")
     strike     = request.args.get("strike", "")
     expiry     = request.args.get("expiry", "")
+    rang       = int(request.args.get("range", 500))   # ±range from spot
     try:
         from src.instrument_lookup import search_options, get_next_tuesday_expiries
+
+        # ── Get NIFTY spot price for ±range filter ────────────────────────────
+        spot      = None
+        spot_error = None
+        if client.jwt_token:
+            try:
+                spot = client.get_nifty_spot()
+                logger.info(f"NIFTY spot for search: {spot}")
+            except Exception as e:
+                spot_error = str(e)
+                logger.warning(f"Could not fetch NIFTY spot: {e}")
+
+        # ── Fetch all contracts for this expiry ───────────────────────────────
         results = search_options(underlying=underlying, option_type=opt_type,
-                                 strike=float(strike) if strike else 0, limit=100)
-        # Filter by expiry if provided
+                                 strike=float(strike) if strike else 0, limit=500)
+
+        # Filter by expiry
         if expiry:
             results = [r for r in results if r.get("expiry_display","") == expiry.upper()]
+
+        # Filter ±range from spot (only when no specific strike given)
+        if spot and not strike:
+            atm     = round(spot / 50) * 50    # round to nearest 50
+            lo, hi  = atm - rang, atm + rang
+            filtered = [r for r in results if lo <= r["strike"] <= hi]
+            if filtered:
+                results  = filtered
+                logger.info(f"Filtered to ±{rang} of spot {spot:.0f} (ATM={atm}): {len(results)} contracts")
+
         expiries = get_next_tuesday_expiries(count=6)
-        return jsonify({"results": results[:40], "expiries": expiries})
+        return jsonify({
+            "results":    results[:60],
+            "expiries":   expiries,
+            "spot":       spot,
+            "spot_error": spot_error,
+            "atm":        round(spot / 50) * 50 if spot else None,
+            "range":      rang,
+        })
     except Exception as e:
         logger.error(f"Search error: {e}")
         return jsonify({"results": [], "expiries": [], "error": str(e)})
