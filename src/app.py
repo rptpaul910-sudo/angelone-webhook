@@ -298,22 +298,40 @@ tr:hover td{background:#ffffff05;}
     <span id="ai-text">—</span>
   </div>
 
+  <!-- Tuesday expiry banner -->
+  <div id="expiry-banner" style="background:#ffd74022;border:1px solid var(--y);border-radius:6px;
+    padding:10px 16px;margin-bottom:14px;font-size:12px;display:none;">
+    📅 <strong style="color:var(--y)">NIFTY Weekly Expiry:</strong>
+    <span id="nearest-expiry" style="color:var(--g)">—</span>
+    <span style="color:var(--mu);margin-left:8px">(expires every Tuesday — update strike weekly)</span>
+  </div>
+
   <div class="row">
     <div class="field">
       <label>Underlying</label>
-      <select id="underlying"><option value="NIFTY">NIFTY</option><option value="BANKNIFTY">BANKNIFTY</option><option value="FINNIFTY">FINNIFTY</option></select>
+      <select id="underlying">
+        <option value="NIFTY">NIFTY (lot=65)</option>
+        <option value="BANKNIFTY">BANKNIFTY (lot=30)</option>
+        <option value="FINNIFTY">FINNIFTY (lot=40)</option>
+      </select>
     </div>
     <div class="field">
       <label>Option Type</label>
       <select id="opt-type"><option value="CE">CE (Call)</option><option value="PE">PE (Put)</option></select>
     </div>
     <div class="field">
-      <label>Strike (optional)</label>
-      <input id="strike" placeholder="e.g. 24500" style="width:130px">
+      <label>Expiry (Tuesday)</label>
+      <select id="expiry-sel" style="min-width:140px">
+        <option value="">Loading...</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Strike</label>
+      <input id="strike" placeholder="e.g. 23500" style="width:110px">
     </div>
     <div class="field">
       <label>Lot Size</label>
-      <input id="lotsize" value="25" style="width:80px">
+      <input id="lotsize" value="65" style="width:70px">
     </div>
     <div class="field" style="justify-content:flex-end">
       <button class="btn btn-b" onclick="search()">🔍 SEARCH</button>
@@ -348,21 +366,43 @@ tr:hover td{background:#ffffff05;}
 <script>
 function toast(m,c='var(--g)'){const e=document.getElementById('toast');e.textContent=m;e.style.color=c;e.style.display='block';setTimeout(()=>e.style.display='none',3000);}
 
+async function loadExpiries(){
+  try {
+    const r = await fetch('/api/expiries');
+    const d = await r.json();
+    if(d.expiries && d.expiries.length){
+      const sel = document.getElementById('expiry-sel');
+      sel.innerHTML = d.expiries.map((e,i)=>
+        `<option value="${e}" ${i===0?'selected':''}>${e}${i===0?' ← nearest':''}</option>`
+      ).join('');
+      document.getElementById('nearest-expiry').textContent = d.nearest + ' (this Tuesday)';
+      document.getElementById('expiry-banner').style.display='block';
+    }
+  } catch(e){ console.log('Expiry load failed:', e); }
+}
+
 async function search(){
   const underlying = document.getElementById('underlying').value;
   const optType    = document.getElementById('opt-type').value;
   const strike     = document.getElementById('strike').value;
+  const expiry     = document.getElementById('expiry-sel').value;
   document.getElementById('status').textContent='Searching...';
   document.getElementById('results-card').style.display='none';
-  const r = await fetch(`/api/search?underlying=${underlying}&type=${optType}&strike=${strike}`);
+  const r = await fetch(`/api/search?underlying=${underlying}&type=${optType}&strike=${strike}&expiry=${expiry}`);
   const d = await r.json();
-  document.getElementById('status').textContent = d.results.length+' contracts found';
-  if(!d.results.length) return;
+  if(d.error){ document.getElementById('status').textContent='❌ Error: '+d.error; return; }
+  document.getElementById('status').textContent = d.results.length+' contracts found for expiry '+expiry;
+  if(!d.results.length){
+    document.getElementById('status').textContent='No contracts found — try a different expiry or clear the strike filter';
+    return;
+  }
   document.getElementById('results-body').innerHTML = d.results.map(x=>
     `<tr>
       <td style="color:var(--y)">${x.trading_symbol}</td>
       <td style="color:var(--mu);font-size:11px">${x.symbol_token}</td>
-      <td>${x.strike}</td><td>${x.expiry}</td><td>${x.lotsize}</td>
+      <td>${x.strike.toLocaleString('en-IN')}</td>
+      <td style="color:var(--g)">${x.expiry_display}</td>
+      <td>${x.lotsize}</td>
       <td><button class="use-btn" onclick="apply('${x.symbol_token}','${x.trading_symbol}',${x.strike},'${document.getElementById('opt-type').value}','${x.expiry}',${x.lotsize})">USE</button></td>
     </tr>`
   ).join('');
@@ -401,7 +441,8 @@ async function applyManual(){
   else toast('❌ '+d.error,'var(--r)');
 }
 
-// Show current active on load
+// Load Tuesday expiries and current active on page load
+loadExpiries();
 fetch('/api/status').then(r=>r.json()).then(d=>{
   if(d.trading_symbol){
     document.getElementById('active-info').style.display='block';
@@ -508,18 +549,31 @@ def api_search():
     underlying = request.args.get("underlying", "NIFTY")
     opt_type   = request.args.get("type", "CE")
     strike     = request.args.get("strike", "")
+    expiry     = request.args.get("expiry", "")
     try:
-        from src.instrument_lookup import search_options
-        results = search_options(underlying=underlying, option_type=opt_type, limit=30)
-        if strike:
-            try:
-                s = float(strike)
-                results = [r for r in results if abs(r["strike"] - s) < 1]
-            except ValueError:
-                pass
-        return jsonify({"results": results})
+        from src.instrument_lookup import search_options, get_next_tuesday_expiries
+        results = search_options(underlying=underlying, option_type=opt_type,
+                                 strike=float(strike) if strike else 0, limit=100)
+        # Filter by expiry if provided
+        if expiry:
+            results = [r for r in results if r.get("expiry_display","") == expiry.upper()]
+        expiries = get_next_tuesday_expiries(count=6)
+        return jsonify({"results": results[:40], "expiries": expiries})
     except Exception as e:
-        return jsonify({"results": [], "error": str(e)})
+        logger.error(f"Search error: {e}")
+        return jsonify({"results": [], "expiries": [], "error": str(e)})
+
+@app.route("/api/expiries")
+def api_expiries():
+    """Return next 6 Tuesday expiry dates."""
+    try:
+        from src.instrument_lookup import get_next_tuesday_expiries, get_nearest_tuesday_expiry
+        return jsonify({
+            "nearest": get_nearest_tuesday_expiry(),
+            "expiries": get_next_tuesday_expiries(count=6),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/manual_order", methods=["POST"])
 def api_manual_order():
