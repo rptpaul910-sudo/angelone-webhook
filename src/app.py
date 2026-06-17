@@ -119,7 +119,8 @@ td{padding:8px 10px;border-bottom:1px solid var(--br);}
     <div class="sym" id="a-sym">—</div>
     <div class="meta" id="a-meta">No option selected — go to Option Selector</div>
     <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
-      <a href="/option"       class="btn btn-b">⚙️ Select Option</a>
+      <a href="/option"       class="btn btn-b">⚙️ NIFTY Option</a>
+      <a href="/mcx"         class="btn btn-o">🛢 MCX Futures</a>
       <a href="/webhook_log" class="btn btn-o" style="font-size:12px">📋 Webhook Log</a>
     </div>
   </div>
@@ -651,7 +652,7 @@ def api_status():
     ltp_error = None
     if active["symbol_token"] and client.jwt_token:
         try:
-            ltp = client.get_ltp("NFO", active["trading_symbol"], active["symbol_token"])
+            ltp = client.get_ltp(active.get("exchange","NFO"), active["trading_symbol"], active["symbol_token"])
         except Exception as e:
             ltp_error = str(e)
             logger.error(f"LTP fetch error: {e}")
@@ -691,6 +692,7 @@ def api_set_option():
         "option_type":    data.get("option_type", "CE"),
         "expiry":         data.get("expiry", ""),
         "lotsize":        int(data.get("lotsize", LOT_SIZE)),
+        "exchange":       data.get("exchange", "NFO"),   # NFO for options, MCX for commodities
     })
     logger.info(f"Active option set: {active}")
     return jsonify({"status": "ok", **active})
@@ -818,6 +820,19 @@ def webhook_log():
     }}
     </script></body></html>"""
 
+@app.route("/api/mcx_search")
+def api_mcx_search():
+    """Search MCX futures. ?name=CRUDEOILM"""
+    name = request.args.get("name", "CRUDEOILM").upper()
+    try:
+        from src.instrument_lookup import search_mcx_futures, MCX_PRESETS
+        results = search_mcx_futures(name=name, limit=10)
+        return jsonify({"results": results, "presets": MCX_PRESETS})
+    except Exception as e:
+        logger.error(f"MCX search error: {e}")
+        return jsonify({"results": [], "presets": {}, "error": str(e)})
+
+
 @app.route("/favicon.ico")
 def favicon(): return "", 204
 
@@ -837,7 +852,7 @@ def _execute_order(action: str):
         ltp = 0.0
         for attempt in range(2):
             try:
-                ltp = client.get_ltp("NFO", active["trading_symbol"], active["symbol_token"])
+                ltp = client.get_ltp(active.get("exchange","NFO"), active["trading_symbol"], active["symbol_token"])
                 break
             except Exception as e:
                 logger.warning(f"LTP fetch attempt {attempt+1} failed: {e}")
@@ -856,12 +871,13 @@ def _execute_order(action: str):
 
         order_result = {}
         if not DRY_RUN:
+            exch = active.get("exchange", "NFO")   # NFO for options, MCX for commodities
             order_result = client.place_order(
                 symbol_token     = active["symbol_token"],
                 trading_symbol   = active["trading_symbol"],
                 transaction_type = action,
                 quantity         = lot,
-                exchange         = "NFO",
+                exchange         = exch,
                 product_type     = "INTRADAY",
             )
 
@@ -878,3 +894,211 @@ def _execute_order(action: str):
     except Exception as e:
         logger.error(f"Order execution error: {e}")
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MCX FUTURES PAGE
+# ─────────────────────────────────────────────────────────────────────────────
+MCX_HTML = """<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCX Futures</title>
+<style>
+:root{--bg:#0d0f14;--sf:#161920;--sf2:#1c2030;--br:#1e2330;
+  --g:#00e676;--r:#ff5252;--y:#ffd740;--b:#3b82f6;--o:#f97316;
+  --tx:#e8eaf0;--mu:#6b7280;--fn:'JetBrains Mono','Fira Code',monospace;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--tx);font-family:var(--fn);font-size:13px;}
+header{padding:14px 24px;border-bottom:1px solid var(--br);display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+header h1{font-size:16px;letter-spacing:2px;color:var(--o);}
+a.back{color:var(--mu);text-decoration:none;font-size:12px;}
+main{max-width:900px;margin:0 auto;padding:24px;}
+.hint{font-size:11px;color:var(--mu);margin-bottom:16px;line-height:1.7;
+  background:var(--sf);border:1px solid var(--br);border-radius:6px;padding:10px 14px;}
+.presets{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px;}
+.chip{padding:10px 14px;border-radius:6px;font-family:var(--fn);font-size:12px;cursor:pointer;
+  border:1px solid var(--br);background:var(--sf2);color:var(--tx);transition:all .15s;min-width:110px;}
+.chip:hover{border-color:var(--o);color:var(--o);}
+.chip.active{border-color:var(--g);background:#00e67611;color:var(--g);}
+.chip .sym{font-weight:700;font-size:13px;}
+.chip .lot{font-size:10px;color:var(--mu);margin-top:2px;}
+.chip.active .lot{color:#00e67699;}
+.card{background:var(--sf);border:1px solid var(--br);border-radius:8px;padding:16px;margin-bottom:14px;}
+table{width:100%;border-collapse:collapse;font-size:12px;}
+th{text-align:left;font-size:10px;color:var(--mu);letter-spacing:1px;padding:7px 10px;border-bottom:1px solid var(--br);}
+td{padding:9px 10px;border-bottom:1px solid var(--br);}
+.use-btn{padding:5px 14px;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;border:none;background:var(--g);color:#000;}
+input{background:var(--sf2);border:1px solid var(--br);border-radius:6px;
+  color:var(--tx);font-family:var(--fn);font-size:13px;padding:8px 12px;}
+.btn{padding:8px 18px;border-radius:6px;font-family:var(--fn);font-size:13px;font-weight:700;cursor:pointer;border:none;}
+.btn-g{background:var(--g);color:#000;}
+#status{font-size:12px;margin:10px 0;min-height:16px;color:var(--mu);}
+#active-info{background:#00e67611;border:1px solid var(--g);border-radius:6px;
+  padding:12px 16px;margin-bottom:14px;display:none;font-size:12px;}
+#toast{position:fixed;bottom:20px;right:20px;background:var(--sf);border:1px solid var(--br);
+  padding:10px 18px;border-radius:6px;font-size:12px;display:none;z-index:99;}
+</style></head><body>
+<header>
+  <a class="back" href="/">← Dashboard</a>
+  <h1>🛢 MCX FUTURES</h1>
+  <span id="cur-badge" style="font-size:12px;color:var(--y)">No instrument selected</span>
+</header>
+<main>
+  <div class="hint">
+    Select a commodity futures contract. Angel One SmartAPI supports all MCX instruments.<br>
+    <strong>CrudeOil Mini</strong> lot = 10 barrels &nbsp;|&nbsp;
+    Contracts expire monthly — re-select after expiry &nbsp;|&nbsp;
+    Click the nearest expiry contract (highlighted green).
+  </div>
+
+  <div id="active-info">
+    <strong style="color:var(--g)">✅ ACTIVE INSTRUMENT:</strong>
+    <span id="ai-text">—</span>
+  </div>
+
+  <div style="font-size:10px;color:var(--mu);letter-spacing:1px;text-transform:uppercase;margin-bottom:10px">SELECT COMMODITY</div>
+  <div class="presets" id="presets"></div>
+
+  <div id="status"></div>
+
+  <div class="card" id="results-card" style="display:none">
+    <table>
+      <thead><tr><th>Symbol</th><th>Token</th><th>Expiry</th><th>Lot Size</th><th>Type</th><th></th></tr></thead>
+      <tbody id="results-body"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div style="font-size:10px;color:var(--mu);letter-spacing:1px;text-transform:uppercase;margin-bottom:12px">MANUAL ENTRY (if search fails)</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <label style="font-size:10px;color:var(--mu);letter-spacing:1px;text-transform:uppercase">Symbol Token</label>
+        <input id="m-token" placeholder="e.g. 234230" style="width:130px">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <label style="font-size:10px;color:var(--mu);letter-spacing:1px;text-transform:uppercase">Trading Symbol</label>
+        <input id="m-sym" placeholder="e.g. CRUDEOILM24JUNFUT" style="width:210px">
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <label style="font-size:10px;color:var(--mu);letter-spacing:1px;text-transform:uppercase">Lot Size</label>
+        <input id="m-lot" placeholder="10" style="width:70px">
+      </div>
+      <button class="btn btn-g" onclick="applyManual()">✅ SET ACTIVE</button>
+    </div>
+    <div style="font-size:11px;color:var(--mu);margin-top:10px">
+      Find token from Angel One instrument master:
+      <a href="https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
+         target="_blank" style="color:var(--b)">OpenAPIScripMaster.json</a>
+      → filter exch_seg=MCX, instrumenttype=FUTCOM
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+const PRESETS = {
+  CRUDEOILM: {desc:'CrudeOil Mini', lot:10},
+  CRUDEOIL:  {desc:'CrudeOil',      lot:100},
+  SILVERM:   {desc:'Silver Mini',   lot:5},
+  SILVER:    {desc:'Silver',        lot:30},
+  GOLDM:     {desc:'Gold Mini',     lot:10},
+  GOLD:      {desc:'Gold',          lot:100},
+  NATURALGAS:{desc:'Natural Gas',   lot:1250},
+  COPPER:    {desc:'Copper',        lot:2500},
+};
+
+function toast(m,c='var(--g)'){const e=document.getElementById('toast');e.textContent=m;e.style.color=c;e.style.display='block';setTimeout(()=>e.style.display='none',3000);}
+
+function buildPresets(){
+  const d=document.getElementById('presets');
+  for(const [sym,info] of Object.entries(PRESETS)){
+    const c=document.createElement('div');
+    c.className='chip'; c.id='chip-'+sym;
+    c.innerHTML=`<div class="sym">${sym}</div><div class="lot">${info.desc} | lot=${info.lot}</div>`;
+    c.onclick=()=>searchMCX(sym);
+    d.appendChild(c);
+  }
+}
+
+async function searchMCX(name){
+  document.querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));
+  const chip=document.getElementById('chip-'+name); if(chip) chip.classList.add('active');
+  const st=document.getElementById('status');
+  st.style.color='var(--mu)'; st.textContent='Searching live contracts for '+name+' on MCX...';
+  document.getElementById('results-card').style.display='none';
+
+  const r=await fetch('/api/mcx_search?name='+name);
+  const d=await r.json();
+
+  if(d.error){
+    st.style.color='var(--r)';
+    st.textContent='❌ '+d.error;
+    return;
+  }
+  if(!d.results||!d.results.length){
+    st.style.color='var(--y)';
+    st.textContent='No active contracts found for '+name+' — may have just expired. Try manual entry below.';
+    return;
+  }
+
+  st.style.color='var(--g)';
+  st.textContent=d.results.length+' active contracts found — click USE on nearest expiry (highlighted)';
+
+  document.getElementById('results-body').innerHTML=d.results.map((x,i)=>
+    `<tr style="${i===0?'background:#00e67608':''}">
+      <td style="color:${i===0?'var(--y)':'var(--tx)'};font-weight:${i===0?'700':'400'}">
+        ${x.trading_symbol}
+        ${i===0?'<span style="font-size:10px;color:var(--g);margin-left:6px">← nearest expiry</span>':''}
+      </td>
+      <td style="color:var(--mu);font-size:11px">${x.symbol_token}</td>
+      <td style="color:${i===0?'var(--g)':'var(--tx)'}">${x.expiry_display||x.expiry}</td>
+      <td>${x.lot_size}</td>
+      <td style="color:var(--mu)">MCX ${x.instrument_type}</td>
+      <td><button class="use-btn" onclick="apply('${x.symbol_token}','${x.trading_symbol}',${x.lot_size})">USE</button></td>
+    </tr>`
+  ).join('');
+  document.getElementById('results-card').style.display='block';
+}
+
+async function apply(token, sym, lot){
+  const r=await fetch('/api/set_option',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      symbol_token: token, trading_symbol: sym,
+      strike: 0, option_type: 'FUT',
+      expiry: '', lotsize: lot, exchange: 'MCX'
+    })});
+  const d=await r.json();
+  if(d.status==='ok'){
+    document.getElementById('active-info').style.display='block';
+    document.getElementById('ai-text').textContent=sym+' | token='+token+' | lot='+lot+' | MCX';
+    document.getElementById('cur-badge').textContent=sym+' ✅ active';
+    toast('✅ '+sym+' set — go to dashboard and test webhook');
+  } else { toast('❌ '+d.error,'var(--r)'); }
+}
+
+async function applyManual(){
+  const token=document.getElementById('m-token').value.trim();
+  const sym  =document.getElementById('m-sym').value.trim();
+  const lot  =parseInt(document.getElementById('m-lot').value)||10;
+  if(!token||!sym){toast('Enter both token and symbol','var(--y)');return;}
+  await apply(token,sym,lot);
+}
+
+// Show current active on load
+fetch('/api/status').then(r=>r.json()).then(d=>{
+  if(d.trading_symbol){
+    document.getElementById('cur-badge').textContent=d.trading_symbol+' active';
+    document.getElementById('active-info').style.display='block';
+    document.getElementById('ai-text').textContent=
+      d.trading_symbol+' | token='+d.symbol_token+' | lot='+d.lotsize;
+  }
+});
+
+buildPresets();
+
+// Auto-search CrudeOil Mini on load
+searchMCX('CRUDEOILM');
+</script></body></html>"""
+
+@app.route("/mcx")
+def mcx_page(): return render_template_string(MCX_HTML)

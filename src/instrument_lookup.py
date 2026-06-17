@@ -205,3 +205,59 @@ def clear_cache():
     global _cache
     _cache = []
     logger.info("Instrument cache cleared")
+
+
+# ── MCX Futures Support ───────────────────────────────────────────────────────
+
+MCX_PRESETS = {
+    "CRUDEOILM":  {"name": "CrudeOil Mini",  "lot": 10,   "desc": "Crude Oil Mini Futures"},
+    "CRUDEOIL":   {"name": "CrudeOil",        "lot": 100,  "desc": "Crude Oil Futures"},
+    "SILVERM":    {"name": "Silver Mini",      "lot": 5,    "desc": "Silver Mini Futures"},
+    "SILVER":     {"name": "Silver",           "lot": 30,   "desc": "Silver Futures"},
+    "GOLDM":      {"name": "Gold Mini",        "lot": 10,   "desc": "Gold Mini Futures"},
+    "GOLD":       {"name": "Gold",             "lot": 100,  "desc": "Gold Futures"},
+    "NATURALGAS": {"name": "Natural Gas",      "lot": 1250, "desc": "Natural Gas Futures"},
+    "COPPER":     {"name": "Copper",           "lot": 2500, "desc": "Copper Futures"},
+    "ZINC":       {"name": "Zinc",             "lot": 5000, "desc": "Zinc Futures"},
+    "ALUMINIUM":  {"name": "Aluminium",        "lot": 5000, "desc": "Aluminium Futures"},
+}
+
+
+def search_mcx_futures(name: str = "CRUDEOILM", limit: int = 10) -> list:
+    """
+    Search active MCX commodity futures.
+    Angel One uses exch_seg='MCX' and instrumenttype='FUTCOM' for commodity futures.
+    """
+    # Use separate MCX master URL
+    mcx_url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
+    instruments = _fetch()   # same master file has MCX too
+    today = datetime.now(IST).date()
+    name  = name.upper().strip()
+    results = []
+
+    for inst in instruments:
+        if inst.get("exch_seg") != "MCX":
+            continue
+        itype = inst.get("instrumenttype", "").upper()
+        if itype not in ("FUTCOM", "FUT", "FUTIDX"):
+            continue
+        sym = inst.get("symbol", "").upper()
+        if not sym.startswith(name):
+            continue
+        expiry = _parse_expiry(inst.get("expiry", ""))
+        if not expiry or expiry < today:
+            continue
+        results.append({
+            "symbol_token":   str(inst.get("token", "")),
+            "trading_symbol": inst.get("symbol", ""),
+            "name":           inst.get("name", ""),
+            "expiry":         expiry.strftime("%Y-%m-%d"),
+            "expiry_display": inst.get("expiry", ""),
+            "lot_size":       int(inst.get("lotsize", MCX_PRESETS.get(name, {}).get("lot", 1))),
+            "instrument_type": itype,
+            "exchange":       "MCX",
+            "tick_size":      inst.get("tick_size", "1"),
+        })
+
+    results.sort(key=lambda x: x["expiry"])
+    return results[:limit]
